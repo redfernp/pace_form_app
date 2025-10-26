@@ -83,7 +83,6 @@ def lcp_from_delta(style: str, dvp: Optional[float], s: Settings) -> str:
 
 
 def speed_score(dvp: Optional[float]) -> float:
-    """Map Δ vs Par to a 1..5 speed score."""
     if dvp is None:
         return 3.0
     if dvp >= 2:
@@ -101,8 +100,6 @@ def speed_score(dvp: Optional[float]) -> float:
 # -----------------------------
 
 def project_pace(rows: List[HorseRow], s: Settings) -> Tuple[str, float, Dict[str, str]]:
-    """Return (scenario, confidence, lcp_map). Applies Weak Solo Leader rule.
-    Safe for empty inputs (returns N/A)."""
     if not rows:
         return "N/A", 0.0, {}
 
@@ -132,7 +129,6 @@ def project_pace(rows: List[HorseRow], s: Settings) -> Tuple[str, float, Dict[st
     else:
         scenario, base_conf = "Slow", 0.7
 
-    # Weak Solo Leader Rule
     front_only = d[d["style"] == "Front"]
     if len(front_only) == 1:
         dvp_front = front_only.iloc[0]["dvp"]
@@ -192,56 +188,20 @@ def normalize_two_files(df_a: pd.DataFrame, df_b: pd.DataFrame) -> Tuple[pd.Data
         "AdjSpeed","OR","OR_HighestWin"
     ]
     aliases = {
-        # Horse name variants
-        "horse": "Horse",
-        "horse name": "Horse",
-        "horse_name": "Horse",
-        "name": "Horse",
-        "runner": "Horse",
-
-        # Speed / ratings variants
-        "adj_speed": "AdjSpeed",
-        "adjusted speed": "AdjSpeed",
-        "adjustedspeed": "AdjSpeed",
-        "speed": "AdjSpeed",
-        "key_speed": "AdjSpeed",
-
-        "or": "OR",
-        "or today": "OR",
-        "or_today": "OR",
-        "or_today_lb": "OR",
-
-        "or_high": "OR_HighestWin",
-        "highest winning or": "OR_HighestWin",
-        "highest_win_or": "OR_HighestWin",
-
-        # Run style variants
-        "lto1": "RS_Lto1", "lto2": "RS_Lto2", "lto3": "RS_Lto3", "lto4": "RS_Lto4", "lto5": "RS_Lto5",
-        "rs1": "RS_Lto1", "rs2": "RS_Lto2", "rs3": "RS_Lto3", "rs4": "RS_Lto4", "rs5": "RS_Lto5",
-        "rs_lto1": "RS_Lto1", "rs_lto2": "RS_Lto2", "rs_lto3": "RS_Lto3", "rs_lto4": "RS_Lto4", "rs_lto5": "RS_Lto5",
+        "horse": "Horse", "horse name": "Horse", "horse_name": "Horse", "name": "Horse", "runner": "Horse",
+        "adj_speed": "AdjSpeed", "speed": "AdjSpeed", "key_speed": "AdjSpeed", "key speed factors average": "AdjSpeed",
+        "or": "OR", "or_today": "OR", "or_today_lb": "OR", "or today": "OR",
+        "or_high": "OR_HighestWin", "highest_win_or": "OR_HighestWin", "highest winning or": "OR_HighestWin",
+        "lto1": "RS_Lto1","lto2":"RS_Lto2","lto3":"RS_Lto3","lto4":"RS_Lto4","lto5":"RS_Lto5",
+        "rs1":"RS_Lto1","rs2":"RS_Lto2","rs3":"RS_Lto3","rs4":"RS_Lto4","rs5":"RS_Lto5",
     }
 
-    def std(df: pd.DataFrame) -> pd.DataFrame:
-        # Lower/strip column names, then map aliases
+    def std(df):
         cols = {c: aliases.get(str(c).strip().lower(), c) for c in df.columns}
-        out = df.rename(columns=cols).copy()
-        # Canonicalize horse text if present: trim and collapse whitespace
-        if "Horse" in out.columns:
-            out["Horse"] = (
-                out["Horse"].astype(str)
-                .str.strip()
-                .str.replace(r"\s+", " ", regex=True)
-            )
-        return out
+        return df.rename(columns=cols)
 
     A = std(df_a)
     B = std(df_b)
-
-    # Helpful diagnostics if Horse is missing
-    if "Horse" not in A.columns:
-        raise ValueError(f"File A missing 'Horse' column after normalization. Found: {list(A.columns)}")
-    if "Horse" not in B.columns:
-        raise ValueError(f"File B missing 'Horse' column after normalization. Found: {list(B.columns)}")
 
     keep_a = [c for c in A.columns if c in ["Horse","RS_Lto1","RS_Lto2","RS_Lto3","RS_Lto4","RS_Lto5"]]
     keep_b = [c for c in B.columns if c in ["Horse","AdjSpeed","OR","OR_HighestWin"]]
@@ -251,19 +211,14 @@ def normalize_two_files(df_a: pd.DataFrame, df_b: pd.DataFrame) -> Tuple[pd.Data
 
     merged = pd.merge(A, B, on="Horse", how="left")
 
-    # Ensure all required columns exist
     for col in REQUIRED:
         if col not in merged.columns:
             merged[col] = None
 
-    # Cast run styles to int (0 when missing)
     for c in [f"RS_Lto{i}" for i in range(1,6)]:
         merged[c] = merged[c].fillna(0).astype(int)
 
-    info = (
-        f"Normalized columns: {list(merged.columns)}. Rows: {len(merged)} | "
-        f"A cols: {list(A.columns)} | B cols: {list(B.columns)}"
-    )
+    info = f"Normalized columns: {list(merged.columns)}. Rows: {len(merged)}"
     return merged[REQUIRED], info
 
 # -----------------------------
@@ -291,7 +246,6 @@ def to_rows(df: pd.DataFrame) -> List[HorseRow]:
 st.set_page_config(page_title="PaceForm – One-File App", page_icon="🏇", layout="wide")
 st.title("🏇 PaceForm – Pace & Class Analysis (One-file App)")
 
-# Sidebar controls
 st.sidebar.header("Race Settings")
 s = Settings()
 s.class_par = st.sidebar.number_input("Class Par", value=float(s.class_par))
@@ -310,7 +264,6 @@ st.sidebar.header("Weights")
 s.wp_even = st.sidebar.slider("wp (Even/Uncertain)", 0.3, 0.8, float(s.wp_even), 0.05)
 s.wp_confident = st.sidebar.slider("wp (Predictable Slow/Very Strong)", 0.3, 0.8, float(s.wp_confident), 0.05)
 
-# Uploaders
 st.markdown("#### Upload input files (both files required)")
 left, right = st.columns(2)
 with left:
@@ -318,12 +271,10 @@ with left:
 with right:
     f2 = st.file_uploader("File B (speed & ratings)", type=["csv"], key="file_b")
 
-# Require both files; no fallback data
 if not (f1 and f2):
     st.info("Please upload both CSV files to generate the analysis.")
     st.stop()
 
-# Build dataframe from uploads
 try:
     df, info = normalize_two_files(pd.read_csv(f1), pd.read_csv(f2))
     st.success("Two files normalized ✔")
@@ -332,10 +283,8 @@ except Exception as e:
     st.error(f"Failed to read/normalize files: {e}")
     st.stop()
 
-# Display input
 st.dataframe(df, use_container_width=True, hide_index=True)
 
-# Build rows & run engine
 rows = to_rows(df)
 res = suitability(rows, s)
 if res.empty:
@@ -347,7 +296,6 @@ conf = float(res.iloc[0]["Confidence"]) if "Confidence" in res.columns else 0.0
 
 st.subheader(f"Projected Pace: {scenario} (confidence {conf:.2f})")
 
-# Tables
 cols = st.columns([1.6, 1.4])
 with cols[0]:
     st.markdown("### Suitability Ratings")
@@ -360,7 +308,6 @@ with cols[1]:
     show = res[["Horse","AvgStyle","Style","LCP","ΔvsPar"]].copy()
     st.dataframe(show, use_container_width=True)
 
-# Verdict
 st.markdown("### Final Verdict")
 short = res.sort_values(["Suitability","SpeedFit"], ascending=False).head(3)[[
     "Horse","Suitability","Style","ΔvsPar"
@@ -369,7 +316,6 @@ for i, row in short.reset_index(drop=True).iterrows():
     medals = ["🥇","🥈","🥉"][i]
     st.write(f"{medals} **{row['Horse']}** – Score {row['Suitability']} | {row['Style']} | ΔvsPar {row['ΔvsPar']}")
 
-# Download button for results
 csv_bytes = res.to_csv(index=False).encode("utf-8")
 st.download_button(
     label="Download results as CSV",
@@ -379,5 +325,3 @@ st.download_button(
 )
 
 st.caption("Weak Solo Leader rule applied automatically when applicable.")
-
-
