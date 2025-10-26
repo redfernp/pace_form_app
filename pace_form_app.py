@@ -192,20 +192,56 @@ def normalize_two_files(df_a: pd.DataFrame, df_b: pd.DataFrame) -> Tuple[pd.Data
         "AdjSpeed","OR","OR_HighestWin"
     ]
     aliases = {
-        "horse": "Horse", "name": "Horse", "runner": "Horse",
-        "adj_speed": "AdjSpeed", "speed": "AdjSpeed", "key_speed": "AdjSpeed",
-        "or": "OR", "or_today": "OR", "or_today_lb": "OR",
-        "or_high": "OR_HighestWin", "highest_win_or": "OR_HighestWin",
-        "lto1": "RS_Lto1","lto2":"RS_Lto2","lto3":"RS_Lto3","lto4":"RS_Lto4","lto5":"RS_Lto5",
-        "rs1":"RS_Lto1","rs2":"RS_Lto2","rs3":"RS_Lto3","rs4":"RS_Lto4","rs5":"RS_Lto5",
+        # Horse name variants
+        "horse": "Horse",
+        "horse name": "Horse",
+        "horse_name": "Horse",
+        "name": "Horse",
+        "runner": "Horse",
+
+        # Speed / ratings variants
+        "adj_speed": "AdjSpeed",
+        "adjusted speed": "AdjSpeed",
+        "adjustedspeed": "AdjSpeed",
+        "speed": "AdjSpeed",
+        "key_speed": "AdjSpeed",
+
+        "or": "OR",
+        "or today": "OR",
+        "or_today": "OR",
+        "or_today_lb": "OR",
+
+        "or_high": "OR_HighestWin",
+        "highest winning or": "OR_HighestWin",
+        "highest_win_or": "OR_HighestWin",
+
+        # Run style variants
+        "lto1": "RS_Lto1", "lto2": "RS_Lto2", "lto3": "RS_Lto3", "lto4": "RS_Lto4", "lto5": "RS_Lto5",
+        "rs1": "RS_Lto1", "rs2": "RS_Lto2", "rs3": "RS_Lto3", "rs4": "RS_Lto4", "rs5": "RS_Lto5",
+        "rs_lto1": "RS_Lto1", "rs_lto2": "RS_Lto2", "rs_lto3": "RS_Lto3", "rs_lto4": "RS_Lto4", "rs_lto5": "RS_Lto5",
     }
 
-    def std(df):
+    def std(df: pd.DataFrame) -> pd.DataFrame:
+        # Lower/strip column names, then map aliases
         cols = {c: aliases.get(str(c).strip().lower(), c) for c in df.columns}
-        return df.rename(columns=cols)
+        out = df.rename(columns=cols).copy()
+        # Canonicalize horse text if present: trim and collapse whitespace
+        if "Horse" in out.columns:
+            out["Horse"] = (
+                out["Horse"].astype(str)
+                .str.strip()
+                .str.replace(r"\s+", " ", regex=True)
+            )
+        return out
 
     A = std(df_a)
     B = std(df_b)
+
+    # Helpful diagnostics if Horse is missing
+    if "Horse" not in A.columns:
+        raise ValueError(f"File A missing 'Horse' column after normalization. Found: {list(A.columns)}")
+    if "Horse" not in B.columns:
+        raise ValueError(f"File B missing 'Horse' column after normalization. Found: {list(B.columns)}")
 
     keep_a = [c for c in A.columns if c in ["Horse","RS_Lto1","RS_Lto2","RS_Lto3","RS_Lto4","RS_Lto5"]]
     keep_b = [c for c in B.columns if c in ["Horse","AdjSpeed","OR","OR_HighestWin"]]
@@ -215,14 +251,19 @@ def normalize_two_files(df_a: pd.DataFrame, df_b: pd.DataFrame) -> Tuple[pd.Data
 
     merged = pd.merge(A, B, on="Horse", how="left")
 
+    # Ensure all required columns exist
     for col in REQUIRED:
         if col not in merged.columns:
             merged[col] = None
 
+    # Cast run styles to int (0 when missing)
     for c in [f"RS_Lto{i}" for i in range(1,6)]:
         merged[c] = merged[c].fillna(0).astype(int)
 
-    info = f"Normalized columns: {list(merged.columns)}. Rows: {len(merged)}"
+    info = (
+        f"Normalized columns: {list(merged.columns)}. Rows: {len(merged)} | "
+        f"A cols: {list(A.columns)} | B cols: {list(B.columns)}"
+    )
     return merged[REQUIRED], info
 
 # -----------------------------
@@ -338,4 +379,5 @@ st.download_button(
 )
 
 st.caption("Weak Solo Leader rule applied automatically when applicable.")
+
 
