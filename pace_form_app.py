@@ -100,6 +100,12 @@ def speed_score(dvp: Optional[float]) -> float:
 # -----------------------------
 
 def project_pace(rows: List[HorseRow], s: Settings) -> Tuple[str, float, Dict[str, str]]:
+    """Return (scenario, confidence, lcp_map) with Front-vs-Prominent awareness.
+    - "Strong" normally requires a credible Front presence.
+    - If there are **no Front** runners, cap at **Even**, unless there is a
+      *rare* cluster of >=3 High Prominent runners with near-par speed.
+    - Applies Weak Solo Leader rule (Front only & ≤ -8 vs Par => downgrade).
+    """
     if not rows:
         return "N/A", 0.0, {}
 
@@ -115,20 +121,51 @@ def project_pace(rows: List[HorseRow], s: Settings) -> Tuple[str, float, Dict[st
     if d.empty or not set(["style","lcp"]).issubset(d.columns):
         return "N/A", 0.0, {}
 
-    credible = d[(d["style"].isin(["Front", "Prominent"])) & (d["lcp"] == "High")]
-    questionable = d[(d["style"].isin(["Front", "Prominent"])) & (d["lcp"] == "Questionable")]
+    # Counts by role & credibility
+    n_front = (d["style"] == "Front").sum()
+    front_high = d[(d["style"] == "Front") & (d["lcp"] == "High")]
+    prom_high  = d[(d["style"] == "Prominent") & (d["lcp"] == "High")]
+    front_q    = d[(d["style"] == "Front") & (d["lcp"] == "Questionable")]
+    prom_q     = d[(d["style"] == "Prominent") & (d["lcp"] == "Questionable")]
 
-    if len(credible) >= 2:
+    n_front_high = len(front_high)
+    n_prom_high  = len(prom_high)
+    n_front_q    = len(front_q)
+    n_prom_q     = len(prom_q)
+
+    # Early energy heuristic (weights Front more than Prominent)
+    early_energy = 2.0*n_front_high + 1.0*n_prom_high + 0.5*n_front_q + 0.25*n_prom_q
+
+    # Base scenario (before caps/adjustments)
+    if n_front_high >= 1 and (n_front_high + n_prom_high) >= 2:
         scenario, base_conf = "Strong", 0.65
-    elif len(credible) == 1 and len(questionable) >= 1:
+    elif early_energy >= 3.0:  # enough credible pressure overall
+        scenario, base_conf = "Strong", 0.6
+    elif (n_front_high + n_prom_high) == 1 and (n_front_q + n_prom_q) >= 1:
         scenario, base_conf = "Even", 0.55
-    elif len(credible) == 1:
+    elif (n_front_high + n_prom_high) == 1:
         scenario, base_conf = "Even", 0.6
-    elif len(questionable) >= 1:
+    elif (n_front_q + n_prom_q) >= 1:
         scenario, base_conf = "Slow", 0.6
     else:
         scenario, base_conf = "Slow", 0.7
 
+    # CAP: If **no Front** runners at all, do not go above Even *unless*
+    # we have a rare cluster of Prominent-High near/above par.
+    if n_front == 0:
+        # If 3+ High Prominent and their average dvp >= -1 (i.e., ~on par), allow Strong
+        allow_strong = False
+        if n_prom_high >= 3:
+            try:
+                allow_strong = float(prom_high["dvp"].mean()) >= -1.0
+            except Exception:
+                allow_strong = False
+        if not allow_strong:
+            # Cap to Even
+            scenario = "Even" if scenario in ("Strong", "Very Strong") else scenario
+            base_conf = min(base_conf, 0.6)
+
+    # Weak Solo Leader Rule: single Front with dvp <= -8 → downgrade one category
     front_only = d[d["style"] == "Front"]
     if len(front_only) == 1:
         dvp_front = front_only.iloc[0]["dvp"]
