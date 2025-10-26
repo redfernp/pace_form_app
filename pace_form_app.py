@@ -101,7 +101,11 @@ def speed_score(dvp: Optional[float]) -> float:
 # -----------------------------
 
 def project_pace(rows: List[HorseRow], s: Settings) -> Tuple[str, float, Dict[str, str]]:
-    """Return (scenario, confidence, lcp_map). Applies Weak Solo Leader rule."""
+    """Return (scenario, confidence, lcp_map). Applies Weak Solo Leader rule.
+    Safe for empty inputs (returns N/A)."""
+    if not rows:
+        return "N/A", 0.0, {}
+
     df = []
     for r in rows:
         avg = avg_style(r.run_styles)
@@ -111,10 +115,12 @@ def project_pace(rows: List[HorseRow], s: Settings) -> Tuple[str, float, Dict[st
         df.append(dict(horse=r.horse, avg=avg, style=style, dvp=dvp, lcp=lcp))
     d = pd.DataFrame(df)
 
-    credible = d[(d.style.isin(["Front", "Prominent"])) & (d.lcp == "High")]
-    questionable = d[(d.style.isin(["Front", "Prominent"])) & (d.lcp == "Questionable")]
+    if d.empty or not set(["style","lcp"]).issubset(d.columns):
+        return "N/A", 0.0, {}
 
-    # Base scenario from credible early speed
+    credible = d[(d["style"].isin(["Front", "Prominent"])) & (d["lcp"] == "High")]
+    questionable = d[(d["style"].isin(["Front", "Prominent"])) & (d["lcp"] == "Questionable")]
+
     if len(credible) >= 2:
         scenario, base_conf = "Strong", 0.65
     elif len(credible) == 1 and len(questionable) >= 1:
@@ -126,15 +132,15 @@ def project_pace(rows: List[HorseRow], s: Settings) -> Tuple[str, float, Dict[st
     else:
         scenario, base_conf = "Slow", 0.7
 
-    # Weak Solo Leader Rule: single Front with dvp <= -8 → downgrade one category toward Slow
-    front_only = d[d.style == "Front"]
+    # Weak Solo Leader Rule
+    front_only = d[d["style"] == "Front"]
     if len(front_only) == 1:
-        dvp_front = front_only.iloc[0].dvp
-        if (dvp_front is not None) and (dvp_front <= -8):
+        dvp_front = front_only.iloc[0]["dvp"]
+        if (pd.notna(dvp_front)) and (dvp_front <= -8):
             scenario = PACE_ORDER[max(0, PACE_ORDER.index(scenario) - 1)]
-            base_conf = max(base_conf, 0.65)  # More predictable when a weak leader controls
+            base_conf = max(base_conf, 0.65)
 
-    lcp_map = dict(zip(d.horse, d.lcp))
+    lcp_map = dict(zip(d["horse"], d["lcp"]))
     return scenario, base_conf, lcp_map
 
 # -----------------------------
@@ -142,7 +148,12 @@ def project_pace(rows: List[HorseRow], s: Settings) -> Tuple[str, float, Dict[st
 # -----------------------------
 
 def suitability(rows: List[HorseRow], s: Settings) -> pd.DataFrame:
+    if not rows:
+        return pd.DataFrame()
     scenario, conf, lcp_map = project_pace(rows, s)
+    if scenario == "N/A":
+        return pd.DataFrame()
+
     wp = s.wp_confident if scenario in ("Slow", "Very Strong") and conf >= 0.65 else s.wp_even
     ws = 1 - wp
 
@@ -233,23 +244,6 @@ def to_rows(df: pd.DataFrame) -> List[HorseRow]:
     return rows
 
 # -----------------------------
-# Embedded sample data (fallback)
-# -----------------------------
-SAMPLE_CSV = """Horse,RS_Lto1,RS_Lto2,RS_Lto3,RS_Lto4,RS_Lto5,AdjSpeed,OR,OR_HighestWin
-Bintjan,1,2,3,0,1,67.5,74,77
-Educating Rita,4,1,4,4,2,,70,72
-Golden Thorn,2,2,4,4,4,,78,80
-Hilltop,4,1,4,2,2,76.2,80,84
-Kindest Nation,4,4,0,4,4,73.7,78,82
-Lady Mariko,3,1,4,4,0,70.3,74,76
-Lady Wingalong,1,2,2,1,2,64.4,68,72
-Lovely Spirit,1,4,3,2,2,62,69,74
-Noisy Music,4,4,2,1,1,76.2,81,85
-Ocean Treaty,4,4,2,0,0,76,79,83
-Soho Square,4,4,1,4,0,78.5,83,86
-"""
-
-# -----------------------------
 # Streamlit UI
 # -----------------------------
 
@@ -276,28 +270,26 @@ s.wp_even = st.sidebar.slider("wp (Even/Uncertain)", 0.3, 0.8, float(s.wp_even),
 s.wp_confident = st.sidebar.slider("wp (Predictable Slow/Very Strong)", 0.3, 0.8, float(s.wp_confident), 0.05)
 
 # Uploaders
-st.markdown("#### Upload input files")
+st.markdown("#### Upload input files (both files required)")
 left, right = st.columns(2)
 with left:
     f1 = st.file_uploader("File A (horses & run styles)", type=["csv"], key="file_a")
 with right:
     f2 = st.file_uploader("File B (speed & ratings)", type=["csv"], key="file_b")
 
-single = st.file_uploader("Or upload a single merged CSV (optional)", type=["csv"], key="single")
+# Require both files; no fallback data
+if not (f1 and f2):
+    st.info("Please upload both CSV files to generate the analysis.")
+    st.stop()
 
-# Determine dataframe
-df: Optional[pd.DataFrame] = None
-info = None
-if f1 is not None and f2 is not None:
+# Build dataframe from uploads
+try:
     df, info = normalize_two_files(pd.read_csv(f1), pd.read_csv(f2))
     st.success("Two files normalized ✔")
     st.caption(info)
-elif single is not None:
-    df = pd.read_csv(single)
-    st.success("Single merged file loaded ✔")
-else:
-    st.caption("No files uploaded – using embedded sample data.")
-    df = pd.read_csv(io.StringIO(SAMPLE_CSV))
+except Exception as e:
+    st.error(f"Failed to read/normalize files: {e}")
+    st.stop()
 
 # Display input
 st.dataframe(df, use_container_width=True, hide_index=True)
@@ -305,10 +297,14 @@ st.dataframe(df, use_container_width=True, hide_index=True)
 # Build rows & run engine
 rows = to_rows(df)
 res = suitability(rows, s)
-scenario = res.iloc[0]["Scenario"] if not res.empty else "N/A"
-conf = float(res.iloc[0]["Confidence"]) if not res.empty else 0.0
+if res.empty:
+    st.warning("No analysable rows after normalization. Check your input files.")
+    st.stop()
 
-st.subheader(f"Projected Pace: {scenario} (confidence {conf:.2f})")
+scenario = res.iloc[0]["Scenario"]
+conf = float(res.iloc[0]["Confidence"]) if "Confidence" in res.columns else 0.0
+
+st.subheader(f"Projected Pace: {scenario} (confidence {conf:.2f})")")
 
 # Tables
 cols = st.columns([1.6, 1.4])
