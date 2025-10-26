@@ -304,7 +304,7 @@ if res.empty:
 scenario = res.iloc[0]["Scenario"]
 conf = float(res.iloc[0]["Confidence"]) if "Confidence" in res.columns else 0.0
 
-st.subheader(f"Projected Pace: {scenario} (confidence {conf:.2f})")")
+st.subheader(f"Projected Pace: {scenario} (confidence {conf:.2f})")
 
 # Tables
 cols = st.columns([1.6, 1.4])
@@ -338,3 +338,4 @@ st.download_button(
 )
 
 st.caption("Weak Solo Leader rule applied automatically when applicable.")
+
