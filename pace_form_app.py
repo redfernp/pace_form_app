@@ -1,5 +1,9 @@
 # pace_form_app.py — Single-file Streamlit app
-# A repeatable pace & class analysis workflow with the "Weak Solo Leader" rule.
+# A repeatable pace & class analysis workflow with realistic pace rules:
+# - Front-aware early-energy model
+# - No-front cap
+# - Single-credible-front cap
+# - Weak solo leader downgrade
 # Usage: streamlit run pace_form_app.py
 
 from __future__ import annotations
@@ -96,85 +100,115 @@ def speed_score(dvp: Optional[float]) -> float:
     return 1.0
 
 # -----------------------------
-# Pace Projection (with Weak Solo Leader rule)
+# Pace Projection (front-aware + caps + weak solo leader)
 # -----------------------------
 
 def project_pace(rows: List[HorseRow], s: Settings) -> Tuple[str, float, Dict[str, str]]:
-    """Return (scenario, confidence, lcp_map) with Front-vs-Prominent awareness.
-    - "Strong" normally requires a credible Front presence.
-    - If there are **no Front** runners, cap at **Even**, unless there is a
-      *rare* cluster of >=3 High Prominent runners with near-par speed.
-    - Applies Weak Solo Leader rule (Front only & ≤ -8 vs Par => downgrade).
+    """
+    Front-aware pace model with realistic caps.
+
+    Rules encoded:
+    1) Early-energy index (Front > Prominent; Questionables discounted).
+    2) NO-FRONT CAP: If no Fronts (or no *High* Fronts), cap at 'Even' unless there are
+       ≥3 High Prominent and their mean ΔvsPar ≥ -1 (near par).
+    3) SINGLE-FRONT CAP:
+       If exactly one High Front is present and its ΔvsPar ≤ +1 (not a big class edge),
+       cap at 'Even' even if Prominent pressure exists.
+       If that lone Front has ΔvsPar ≤ -2 and there are ≤1 High Prominent → allow 'Slow'.
+    4) WEAK SOLO LEADER:
+       If exactly one Front in the whole field and its ΔvsPar ≤ -8, downgrade one category.
     """
     if not rows:
         return "N/A", 0.0, {}
 
-    df = []
+    # Build frame
+    recs = []
     for r in rows:
         avg = avg_style(r.run_styles)
         style = classify_style(avg, s)
         dvp = delta_vs_par(r.adj_speed, s.class_par)
-        lcp = lcp_from_delta(style, dvp, s)
-        df.append(dict(horse=r.horse, avg=avg, style=style, dvp=dvp, lcp=lcp))
-    d = pd.DataFrame(df)
-
-    if d.empty or not set(["style","lcp"]).issubset(d.columns):
+        lcp  = lcp_from_delta(style, dvp, s)
+        recs.append(dict(horse=r.horse, style=style, dvp=dvp, lcp=lcp))
+    d = pd.DataFrame(recs)
+    if d.empty:
         return "N/A", 0.0, {}
 
-    # Counts by role & credibility
-    n_front = (d["style"] == "Front").sum()
-    front_high = d[(d["style"] == "Front") & (d["lcp"] == "High")]
-    prom_high  = d[(d["style"] == "Prominent") & (d["lcp"] == "High")]
-    front_q    = d[(d["style"] == "Front") & (d["lcp"] == "Questionable")]
-    prom_q     = d[(d["style"] == "Prominent") & (d["lcp"] == "Questionable")]
+    # Credibility slices
+    front_all   = d[d["style"] == "Front"]
+    prom_all    = d[d["style"] == "Prominent"]
 
-    n_front_high = len(front_high)
-    n_prom_high  = len(prom_high)
-    n_front_q    = len(front_q)
-    n_prom_q     = len(prom_q)
+    front_high  = d[(d["style"] == "Front") & (d["lcp"] == "High")]
+    prom_high   = d[(d["style"] == "Prominent") & (d["lcp"] == "High")]
+    front_q     = d[(d["style"] == "Front") & (d["lcp"] == "Questionable")]
+    prom_q      = d[(d["style"] == "Prominent") & (d["lcp"] == "Questionable")]
 
-    # Early energy heuristic (weights Front more than Prominent)
-    early_energy = 2.0*n_front_high + 1.0*n_prom_high + 0.5*n_front_q + 0.25*n_prom_q
+    n_front        = len(front_all)
+    n_front_high   = len(front_high)
+    n_prom_high    = len(prom_high)
+    n_front_q      = len(front_q)
+    n_prom_q       = len(prom_q)
 
-    # Base scenario (before caps/adjustments)
-    if n_front_high >= 1 and (n_front_high + n_prom_high) >= 2:
-        scenario, base_conf = "Strong", 0.65
-    elif early_energy >= 3.0:  # enough credible pressure overall
-        scenario, base_conf = "Strong", 0.6
+    # 1) Early energy (tunable weights)
+    W_FH, W_PH, W_FQ, W_PQ = 2.0, 0.8, 0.5, 0.2
+    early_energy = (W_FH*n_front_high) + (W_PH*n_prom_high) + (W_FQ*n_front_q) + (W_PQ*n_prom_q)
+
+    # Base scenario from energy / credible count
+    if n_front_high >= 2:
+        scenario, conf = "Strong", 0.65
+    elif (n_front_high + n_prom_high) >= 3 and early_energy >= 3.2:
+        scenario, conf = "Strong", 0.65
+    elif early_energy >= 3.2:
+        scenario, conf = "Strong", 0.60
+    elif (n_front_high + n_prom_high) >= 2:
+        scenario, conf = "Even", 0.60
     elif (n_front_high + n_prom_high) == 1 and (n_front_q + n_prom_q) >= 1:
-        scenario, base_conf = "Even", 0.55
+        scenario, conf = "Even", 0.55
     elif (n_front_high + n_prom_high) == 1:
-        scenario, base_conf = "Even", 0.6
+        scenario, conf = "Even", 0.60
     elif (n_front_q + n_prom_q) >= 1:
-        scenario, base_conf = "Slow", 0.6
+        scenario, conf = "Slow", 0.60
     else:
-        scenario, base_conf = "Slow", 0.7
+        scenario, conf = "Slow", 0.70
 
-    # CAP: If **no Front** runners at all, do not go above Even *unless*
-    # we have a rare cluster of Prominent-High near/above par.
-    if n_front == 0:
-        # If 3+ High Prominent and their average dvp >= -1 (i.e., ~on par), allow Strong
+    # 2) NO-FRONT CAP (no *effective* Fronts)
+    if n_front == 0 or n_front_high == 0:
         allow_strong = False
         if n_prom_high >= 3:
             try:
-                allow_strong = float(prom_high["dvp"].mean()) >= -1.0
+                allow_strong = float(prom_high["dvp"].mean()) >= -1.0  # near par
             except Exception:
                 allow_strong = False
-        if not allow_strong:
-            # Cap to Even
-            scenario = "Even" if scenario in ("Strong", "Very Strong") else scenario
-            base_conf = min(base_conf, 0.6)
+        if not allow_strong and scenario in ("Strong", "Very Strong"):
+            scenario, conf = "Even", min(conf, 0.60)
 
-    # Weak Solo Leader Rule: single Front with dvp <= -8 → downgrade one category
-    front_only = d[d["style"] == "Front"]
-    if len(front_only) == 1:
-        dvp_front = front_only.iloc[0]["dvp"]
-        if (pd.notna(dvp_front)) and (dvp_front <= -8):
-            scenario = PACE_ORDER[max(0, PACE_ORDER.index(scenario) - 1)]
-            base_conf = max(base_conf, 0.65)
+    # 3) SINGLE-FRONT CAP
+    if n_front_high == 1:
+        try:
+            lone_front_dvp = float(front_high["dvp"].iloc[0])
+        except Exception:
+            lone_front_dvp = None
+
+        if (lone_front_dvp is None) or (lone_front_dvp <= 1.0):
+            if scenario in ("Strong", "Very Strong"):
+                scenario, conf = "Even", max(conf, 0.60)
+
+        if (lone_front_dvp is not None) and (lone_front_dvp <= -2.0) and (n_prom_high <= 1):
+            if scenario == "Even":
+                scenario, conf = "Slow", max(conf, 0.65)
+
+    # 4) WEAK SOLO LEADER (any single Front present and well below par)
+    if n_front == 1:
+        try:
+            dvp_front_any = float(front_all["dvp"].iloc[0])
+        except Exception:
+            dvp_front_any = None
+        if (dvp_front_any is not None) and (dvp_front_any <= -8.0):
+            idx = max(0, PACE_ORDER.index(scenario) - 1)
+            scenario = PACE_ORDER[idx]
+            conf = max(conf, 0.65)
 
     lcp_map = dict(zip(d["horse"], d["lcp"]))
-    return scenario, base_conf, lcp_map
+    return scenario, conf, lcp_map
 
 # -----------------------------
 # Suitability Scoring
@@ -235,10 +269,20 @@ def normalize_two_files(df_a: pd.DataFrame, df_b: pd.DataFrame) -> Tuple[pd.Data
 
     def std(df):
         cols = {c: aliases.get(str(c).strip().lower(), c) for c in df.columns}
-        return df.rename(columns=cols)
+        out = df.rename(columns=cols).copy()
+        if "Horse" in out.columns:
+            out["Horse"] = (
+                out["Horse"].astype(str).str.strip().str.replace(r"\s+", " ", regex=True)
+            )
+        return out
 
     A = std(df_a)
     B = std(df_b)
+
+    if "Horse" not in A.columns:
+        raise ValueError(f"File A missing 'Horse' column after normalization. Found: {list(A.columns)}")
+    if "Horse" not in B.columns:
+        raise ValueError(f"File B missing 'Horse' column after normalization. Found: {list(B.columns)}")
 
     keep_a = [c for c in A.columns if c in ["Horse","RS_Lto1","RS_Lto2","RS_Lto3","RS_Lto4","RS_Lto5"]]
     keep_b = [c for c in B.columns if c in ["Horse","AdjSpeed","OR","OR_HighestWin"]]
@@ -361,4 +405,4 @@ st.download_button(
     mime="text/csv",
 )
 
-st.caption("Weak Solo Leader rule applied automatically when applicable.")
+st.caption("Front-aware model with no-front cap, single-front cap, and weak solo leader adjustments.")
