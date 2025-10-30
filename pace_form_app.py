@@ -5,12 +5,12 @@
 # - Dominant-front cap (new)
 # - Single-credible-front cap
 # - Weak solo leader downgrade
+# ...plus a "Reason used" debug section explaining the choice
 # Usage: streamlit run pace_form_app.py
 
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Dict, Optional, Tuple
-import io
 
 import numpy as np
 import pandas as pd
@@ -104,9 +104,9 @@ def speed_score(dvp: Optional[float]) -> float:
 # Pace Projection (front-aware + caps + weak solo leader + dominant front)
 # -----------------------------
 
-def project_pace(rows: List[HorseRow], s: Settings) -> Tuple[str, float, Dict[str, str]]:
+def project_pace(rows: List[HorseRow], s: Settings) -> Tuple[str, float, Dict[str, str], Dict[str, object]]:
     """
-    Front-aware pace model with realistic caps.
+    Front-aware pace model with realistic caps and a debug payload.
 
     Rules encoded:
     1) Early-energy index (Front > Prominent; Questionables discounted).
@@ -121,8 +121,10 @@ def project_pace(rows: List[HorseRow], s: Settings) -> Tuple[str, float, Dict[st
     5) WEAK SOLO LEADER:
        If exactly one Front in the whole field and its ΔvsPar ≤ -8, downgrade one category.
     """
+    debug = {"rules_applied": []}
+
     if not rows:
-        return "N/A", 0.0, {}
+        return "N/A", 0.0, {}, {"error": "no rows", "rules_applied": []}
 
     # Build frame
     recs = []
@@ -134,7 +136,7 @@ def project_pace(rows: List[HorseRow], s: Settings) -> Tuple[str, float, Dict[st
         recs.append(dict(horse=r.horse, style=style, dvp=dvp, lcp=lcp))
     d = pd.DataFrame(recs)
     if d.empty:
-        return "N/A", 0.0, {}
+        return "N/A", 0.0, {}, {"error": "empty dataframe", "rules_applied": []}
 
     # Credibility slices
     front_all   = d[d["style"] == "Front"]
@@ -158,20 +160,28 @@ def project_pace(rows: List[HorseRow], s: Settings) -> Tuple[str, float, Dict[st
     # Base scenario from energy / credible count
     if n_front_high >= 2:
         scenario, conf = "Strong", 0.65
+        debug["rules_applied"].append("Base: ≥2 High Front → Strong")
     elif (n_front_high + n_prom_high) >= 3 and early_energy >= 3.2:
         scenario, conf = "Strong", 0.65
+        debug["rules_applied"].append("Base: ≥3 High early & energy≥3.2 → Strong")
     elif early_energy >= 3.2:
         scenario, conf = "Strong", 0.60
+        debug["rules_applied"].append("Base: energy≥3.2 → Strong")
     elif (n_front_high + n_prom_high) >= 2:
         scenario, conf = "Even", 0.60
+        debug["rules_applied"].append("Base: ≥2 High early → Even")
     elif (n_front_high + n_prom_high) == 1 and (n_front_q + n_prom_q) >= 1:
         scenario, conf = "Even", 0.55
+        debug["rules_applied"].append("Base: 1 High + some Questionable → Even")
     elif (n_front_high + n_prom_high) == 1:
         scenario, conf = "Even", 0.60
+        debug["rules_applied"].append("Base: 1 High only → Even")
     elif (n_front_q + n_prom_q) >= 1:
         scenario, conf = "Slow", 0.60
+        debug["rules_applied"].append("Base: only Questionables → Slow")
     else:
         scenario, conf = "Slow", 0.70
+        debug["rules_applied"].append("Base: no credible early → Slow")
 
     # 2) NO-FRONT CAP (no *effective* Fronts)
     if n_front == 0 or n_front_high == 0:
@@ -183,6 +193,7 @@ def project_pace(rows: List[HorseRow], s: Settings) -> Tuple[str, float, Dict[st
                 allow_strong = False
         if not allow_strong and scenario in ("Strong", "Very Strong"):
             scenario, conf = "Even", min(conf, 0.60)
+            debug["rules_applied"].append("No-front cap: no High Front (and no strong Prominent cluster) → cap to Even")
 
     # 3) DOMINANT-FRONT CAP (NEW)
     if n_front_high == 1 and n_prom_high <= 1:
@@ -193,21 +204,24 @@ def project_pace(rows: List[HorseRow], s: Settings) -> Tuple[str, float, Dict[st
         if (lone_front_dvp is not None) and (lone_front_dvp >= 2.0):
             if scenario in ("Strong", "Very Strong"):
                 scenario, conf = "Even", max(conf, 0.65)
+                debug["rules_applied"].append("Dominant-front cap: 1 High Front with ΔvsPar≥+2 and ≤1 High Prominent → Strong→Even")
 
     # 4) SINGLE-FRONT CAP (modest edge or below par)
     if n_front_high == 1:
         try:
-            lone_front_dvp = float(front_high["dvp"].iloc[0])
+            lone_front_dvp2 = float(front_high["dvp"].iloc[0])
         except Exception:
-            lone_front_dvp = None
+            lone_front_dvp2 = None
 
-        if (lone_front_dvp is None) or (lone_front_dvp <= 1.0):
+        if (lone_front_dvp2 is None) or (lone_front_dvp2 <= 1.0):
             if scenario in ("Strong", "Very Strong"):
                 scenario, conf = "Even", max(conf, 0.60)
+                debug["rules_applied"].append("Single-front cap: 1 High Front with ΔvsPar≤+1 → Strong→Even")
 
-        if (lone_front_dvp is not None) and (lone_front_dvp <= -2.0) and (n_prom_high <= 1):
+        if (lone_front_dvp2 is not None) and (lone_front_dvp2 <= -2.0) and (n_prom_high <= 1):
             if scenario == "Even":
                 scenario, conf = "Slow", max(conf, 0.65)
+                debug["rules_applied"].append("Single-front below par & little pressure → Even→Slow")
 
     # 5) WEAK SOLO LEADER (any single Front present and well below par)
     if n_front == 1:
@@ -219,20 +233,32 @@ def project_pace(rows: List[HorseRow], s: Settings) -> Tuple[str, float, Dict[st
             idx = max(0, PACE_ORDER.index(scenario) - 1)
             scenario = PACE_ORDER[idx]
             conf = max(conf, 0.65)
+            debug["rules_applied"].append("Weak solo leader: single Front ΔvsPar≤-8 → downgrade one")
+
+    debug.update({
+        "counts": {
+            "Front_all": int(n_front),
+            "Front_High": int(n_front_high),
+            "Front_Questionable": int(n_front_q),
+            "Prominent_High": int(n_prom_high),
+            "Prominent_Questionable": int(n_prom_q),
+        },
+        "early_energy": float(early_energy),
+    })
 
     lcp_map = dict(zip(d["horse"], d["lcp"]))
-    return scenario, conf, lcp_map
+    return scenario, conf, lcp_map, debug
 
 # -----------------------------
 # Suitability Scoring
 # -----------------------------
 
-def suitability(rows: List[HorseRow], s: Settings) -> pd.DataFrame:
+def suitability(rows: List[HorseRow], s: Settings) -> Tuple[pd.DataFrame, Dict[str, object]]:
     if not rows:
-        return pd.DataFrame()
-    scenario, conf, lcp_map = project_pace(rows, s)
+        return pd.DataFrame(), {"error": "no rows"}
+    scenario, conf, lcp_map, debug = project_pace(rows, s)
     if scenario == "N/A":
-        return pd.DataFrame()
+        return pd.DataFrame(), {"error": "pace N/A"}
 
     wp = s.wp_confident if scenario in ("Slow", "Very Strong") and conf >= 0.65 else s.wp_even
     ws = 1 - wp
@@ -260,7 +286,7 @@ def suitability(rows: List[HorseRow], s: Settings) -> pd.DataFrame:
             "Confidence": conf,
         })
     df = pd.DataFrame(out).sort_values(["Suitability", "SpeedFit"], ascending=False)
-    return df
+    return df, debug
 
 # -----------------------------
 # Input Normalization (two-file mode)
@@ -380,7 +406,7 @@ except Exception as e:
 st.dataframe(df, use_container_width=True, hide_index=True)
 
 rows = to_rows(df)
-res = suitability(rows, s)
+res, debug = suitability(rows, s)
 if res.empty:
     st.warning("No analysable rows after normalization. Check your input files.")
     st.stop()
@@ -389,6 +415,25 @@ scenario = res.iloc[0]["Scenario"]
 conf = float(res.iloc[0]["Confidence"]) if "Confidence" in res.columns else 0.0
 
 st.subheader(f"Projected Pace: {scenario} (confidence {conf:.2f})")
+
+# ---- Reason used (explanation block)
+with st.expander("Why this pace? (Reason used)", expanded=True):
+    counts = debug.get("counts", {})
+    st.markdown(
+        f"- **Front (all):** {counts.get('Front_all', 0)} &nbsp;&nbsp; "
+        f"**Front (High):** {counts.get('Front_High', 0)} &nbsp;&nbsp; "
+        f"**Front (Questionable):** {counts.get('Front_Questionable', 0)}  \n"
+        f"- **Prominent (High):** {counts.get('Prominent_High', 0)} &nbsp;&nbsp; "
+        f"**Prominent (Questionable):** {counts.get('Prominent_Questionable', 0)}  \n"
+        f"- **Early energy:** {debug.get('early_energy', 0.0):.2f}"
+    )
+    rules = debug.get("rules_applied", [])
+    if rules:
+        st.markdown("**Rules applied:**")
+        for r in rules:
+            st.write(f"• {r}")
+    else:
+        st.caption("No specific adjustments beyond base rule.")
 
 cols = st.columns([1.6, 1.4])
 with cols[0]:
