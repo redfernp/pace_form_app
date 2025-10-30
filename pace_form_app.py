@@ -2,6 +2,7 @@
 # A repeatable pace & class analysis workflow with realistic pace rules:
 # - Front-aware early-energy model
 # - No-front cap
+# - Dominant-front cap (new)
 # - Single-credible-front cap
 # - Weak solo leader downgrade
 # Usage: streamlit run pace_form_app.py
@@ -100,7 +101,7 @@ def speed_score(dvp: Optional[float]) -> float:
     return 1.0
 
 # -----------------------------
-# Pace Projection (front-aware + caps + weak solo leader)
+# Pace Projection (front-aware + caps + weak solo leader + dominant front)
 # -----------------------------
 
 def project_pace(rows: List[HorseRow], s: Settings) -> Tuple[str, float, Dict[str, str]]:
@@ -111,11 +112,13 @@ def project_pace(rows: List[HorseRow], s: Settings) -> Tuple[str, float, Dict[st
     1) Early-energy index (Front > Prominent; Questionables discounted).
     2) NO-FRONT CAP: If no Fronts (or no *High* Fronts), cap at 'Even' unless there are
        ≥3 High Prominent and their mean ΔvsPar ≥ -1 (near par).
-    3) SINGLE-FRONT CAP:
-       If exactly one High Front is present and its ΔvsPar ≤ +1 (not a big class edge),
-       cap at 'Even' even if Prominent pressure exists.
+    3) DOMINANT-FRONT CAP (NEW):
+       If exactly one High Front with ΔvsPar ≥ +2 and ≤1 High Prominent,
+       cap Strong/Very Strong to 'Even' (leader likely to dictate).
+    4) SINGLE-FRONT CAP (modest edge):
+       If exactly one High Front and its ΔvsPar ≤ +1, cap to 'Even'.
        If that lone Front has ΔvsPar ≤ -2 and there are ≤1 High Prominent → allow 'Slow'.
-    4) WEAK SOLO LEADER:
+    5) WEAK SOLO LEADER:
        If exactly one Front in the whole field and its ΔvsPar ≤ -8, downgrade one category.
     """
     if not rows:
@@ -181,7 +184,17 @@ def project_pace(rows: List[HorseRow], s: Settings) -> Tuple[str, float, Dict[st
         if not allow_strong and scenario in ("Strong", "Very Strong"):
             scenario, conf = "Even", min(conf, 0.60)
 
-    # 3) SINGLE-FRONT CAP
+    # 3) DOMINANT-FRONT CAP (NEW)
+    if n_front_high == 1 and n_prom_high <= 1:
+        try:
+            lone_front_dvp = float(front_high["dvp"].iloc[0])
+        except Exception:
+            lone_front_dvp = None
+        if (lone_front_dvp is not None) and (lone_front_dvp >= 2.0):
+            if scenario in ("Strong", "Very Strong"):
+                scenario, conf = "Even", max(conf, 0.65)
+
+    # 4) SINGLE-FRONT CAP (modest edge or below par)
     if n_front_high == 1:
         try:
             lone_front_dvp = float(front_high["dvp"].iloc[0])
@@ -196,7 +209,7 @@ def project_pace(rows: List[HorseRow], s: Settings) -> Tuple[str, float, Dict[st
             if scenario == "Even":
                 scenario, conf = "Slow", max(conf, 0.65)
 
-    # 4) WEAK SOLO LEADER (any single Front present and well below par)
+    # 5) WEAK SOLO LEADER (any single Front present and well below par)
     if n_front == 1:
         try:
             dvp_front_any = float(front_all["dvp"].iloc[0])
@@ -405,4 +418,4 @@ st.download_button(
     mime="text/csv",
 )
 
-st.caption("Front-aware model with no-front cap, single-front cap, and weak solo leader adjustments.")
+st.caption("Front-aware model with no-front cap, dominant-front cap, single-front cap, and weak solo leader adjustments.")
