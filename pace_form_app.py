@@ -114,9 +114,15 @@ def lcp_from_delta(style: str, dvp: Optional[float], s: Settings) -> str:
     return "Unlikely"
 
 
+# --- CHANGE #1: Penalise missing figure (None) ---
 def speed_score(dvp: Optional[float]) -> float:
+    """
+    Map Δ vs Par to a 1..5 speed score.
+    Missing figure (None) now penalised to 2.3 (was 3.0) so unproven class
+    doesn't float to the top in Slow/route races.
+    """
     if dvp is None:
-        return 3.0
+        return 2.3
     if dvp >= 2:
         return 5.0
     if dvp >= -1:
@@ -326,6 +332,18 @@ def suitability(rows: List[HorseRow], s: Settings) -> Tuple[pd.DataFrame, Dict[s
         wp = max(wp, 0.55)
     ws = 1 - wp
 
+    # --- CHANGE #2: Adaptive ws when many runners have no figure ---
+    missing_count = sum(1 for r in rows if r.adj_speed is None)
+    missing_ratio = missing_count / max(len(rows), 1)
+    if missing_ratio > 0.5:
+        # Reduce influence of SpeedFit when >50% of field are unknowns
+        ws *= 0.8
+        wp = 1 - ws
+        debug["rules_applied"] = debug.get("rules_applied", []) + [
+            f"Adaptive speed weight: {missing_ratio:.0%} missing figures → ws*0.8"
+        ]
+    debug["missing_speed_ratio"] = float(missing_ratio)
+
     out = []
     for r in rows:
         avg = avg_style(r.run_styles)
@@ -489,7 +507,8 @@ with st.expander("Why this pace? (Reason used)", expanded=True):
         f"- **Prominent (High):** {counts.get('Prominent_High', 0)} &nbsp;&nbsp; "
         f"**Prominent (Questionable):** {counts.get('Prominent_Questionable', 0)}  \n"
         f"- **Early energy:** {debug.get('early_energy', 0.0):.2f}  \n"
-        f"- **Distance band:** {debug.get('distance_band', 'route')}"
+        f"- **Distance band:** {debug.get('distance_band', 'route')}  \n"
+        f"- **Missing speed ratio:** {debug.get('missing_speed_ratio', 0.0):.2f}"
     )
     rules = debug.get("rules_applied", [])
     if rules:
@@ -527,4 +546,4 @@ st.download_button(
     mime="text/csv",
 )
 
-st.caption("Front-aware model with sprint-aware (5f/6f) handling, no-front & dominant-front caps, single-front cap, and weak solo leader adjustments.")
+st.caption("Front-aware model with sprint-aware (5f/6f) handling, no-front & dominant-front caps, single-front cap, weak solo leader, and penalties for missing class figures (adaptive speed weight).")
