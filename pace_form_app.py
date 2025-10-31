@@ -2,9 +2,13 @@
 # A repeatable pace & class analysis workflow with realistic pace rules:
 # - Front-aware early-energy model
 # - No-front cap
-# - Dominant-front cap (new)
+# - Dominant-front cap
 # - Single-credible-front cap
 # - Weak solo leader downgrade
+# - Distance-aware sprint handling for 5f & 6f:
+#     * Sprint cap (Strong → Even) when a lone credible front is near/above par with limited pressers
+#     * Sprint-specific PaceFit maps (position > power at short trips)
+#     * Higher pace-weighting at 5–6f
 # ...plus a "Reason used" debug section explaining the choice
 # Usage: streamlit run pace_form_app.py
 
@@ -45,16 +49,39 @@ class Settings:
 STYLE_LABELS = {1: "Front", 2: "Prominent", 3: "Mid", 4: "Hold-up"}
 PACE_ORDER = ["Slow", "Even", "Strong", "Very Strong"]
 
+# Default PaceFit (routes / generic)
 PACEFIT = {
-    "Slow": {"Front": 5, "Prominent": 4, "Mid": 3, "Hold-up": 2},
-    "Even": {"Front": 4, "Prominent": 5, "Mid": 4, "Hold-up": 3},
+    "Slow":   {"Front": 5, "Prominent": 4, "Mid": 3, "Hold-up": 2},
+    "Even":   {"Front": 4, "Prominent": 5, "Mid": 4, "Hold-up": 3},
     "Strong": {"Front": 2, "Prominent": 3, "Mid": 4, "Hold-up": 5},
     "Very Strong": {"Front": 1, "Prominent": 2, "Mid": 4, "Hold-up": 5},
+}
+
+# Sprint-specific PaceFit maps
+# 5f: position >> power; 6f: still pace-positional but slightly more forgiving
+PACEFIT_5F = {
+    "Slow":   {"Front": 5.0, "Prominent": 4.5, "Mid": 3.5, "Hold-up": 2.0},
+    "Even":   {"Front": 4.5, "Prominent": 5.0, "Mid": 3.5, "Hold-up": 2.5},
+    "Strong": {"Front": 3.5, "Prominent": 4.5, "Mid": 4.0, "Hold-up": 3.0},
+}
+PACEFIT_6F = {
+    "Slow":   {"Front": 5.0, "Prominent": 4.5, "Mid": 3.5, "Hold-up": 2.5},
+    "Even":   {"Front": 4.0, "Prominent": 5.0, "Mid": 4.0, "Hold-up": 3.0},
+    "Strong": {"Front": 3.0, "Prominent": 4.0, "Mid": 4.5, "Hold-up": 3.5},
 }
 
 # -----------------------------
 # Core Helpers
 # -----------------------------
+
+def _dist_band(d: float) -> str:
+    """Return distance band: '5f', '6f', or 'route'."""
+    if d <= 5.5:
+        return "5f"
+    if d <= 6.5:
+        return "6f"
+    return "route"
+
 
 def avg_style(run_styles: List[int]) -> float:
     vals = [int(x) for x in run_styles if int(x) != 0]
@@ -101,7 +128,7 @@ def speed_score(dvp: Optional[float]) -> float:
     return 1.0
 
 # -----------------------------
-# Pace Projection (front-aware + caps + weak solo leader + dominant front)
+# Pace Projection (front-aware + caps + weak solo leader + dominant front + sprint caps)
 # -----------------------------
 
 def project_pace(rows: List[HorseRow], s: Settings) -> Tuple[str, float, Dict[str, str], Dict[str, object]]:
@@ -110,9 +137,9 @@ def project_pace(rows: List[HorseRow], s: Settings) -> Tuple[str, float, Dict[st
 
     Rules encoded:
     1) Early-energy index (Front > Prominent; Questionables discounted).
-    2) NO-FRONT CAP: If no Fronts (or no *High* Fronts), cap at 'Even' unless there are
-       ≥3 High Prominent and their mean ΔvsPar ≥ -1 (near par).
-    3) DOMINANT-FRONT CAP (NEW):
+    2) NO-FRONT CAP: If no Fronts (or no *High* Fronts), cap at 'Even' unless
+       ≥3 High Prominent with mean ΔvsPar ≥ -1 (near par).
+    3) DOMINANT-FRONT CAP:
        If exactly one High Front with ΔvsPar ≥ +2 and ≤1 High Prominent,
        cap Strong/Very Strong to 'Even' (leader likely to dictate).
     4) SINGLE-FRONT CAP (modest edge):
@@ -120,6 +147,8 @@ def project_pace(rows: List[HorseRow], s: Settings) -> Tuple[str, float, Dict[st
        If that lone Front has ΔvsPar ≤ -2 and there are ≤1 High Prominent → allow 'Slow'.
     5) WEAK SOLO LEADER:
        If exactly one Front in the whole field and its ΔvsPar ≤ -8, downgrade one category.
+    6) SPRINT CAPS (NEW for 5f & 6f):
+       Lone credible Front near/above par with limited pressers → cap Strong→Even at short trips.
     """
     debug = {"rules_applied": []}
 
@@ -195,7 +224,7 @@ def project_pace(rows: List[HorseRow], s: Settings) -> Tuple[str, float, Dict[st
             scenario, conf = "Even", min(conf, 0.60)
             debug["rules_applied"].append("No-front cap: no High Front (and no strong Prominent cluster) → cap to Even")
 
-    # 3) DOMINANT-FRONT CAP (NEW)
+    # 3) DOMINANT-FRONT CAP
     if n_front_high == 1 and n_prom_high <= 1:
         try:
             lone_front_dvp = float(front_high["dvp"].iloc[0])
@@ -235,6 +264,25 @@ def project_pace(rows: List[HorseRow], s: Settings) -> Tuple[str, float, Dict[st
             conf = max(conf, 0.65)
             debug["rules_applied"].append("Weak solo leader: single Front ΔvsPar≤-8 → downgrade one")
 
+    # 6) SPRINT CAPS (5f & 6f)
+    band = _dist_band(getattr(s, "distance_f", 7.0))
+    if band in ("5f", "6f"):
+        cap_prom_limit = 2
+        energy_cap = 4.0 if band == "5f" else 3.6
+        dvp_ok = -0.5 if band == "5f" else -1.0
+        if n_front_high == 1 and n_prom_high <= cap_prom_limit:
+            try:
+                lf_dvp = float(front_high["dvp"].iloc[0])
+            except Exception:
+                lf_dvp = None
+            if (lf_dvp is not None) and (lf_dvp >= dvp_ok) and (early_energy < energy_cap):
+                if scenario in ("Strong", "Very Strong"):
+                    scenario, conf = "Even", max(conf, 0.65)
+                    debug["rules_applied"].append(
+                        f"Sprint cap ({band}): 1 High Front (Δ≥{dvp_ok}) with ≤{cap_prom_limit} High "
+                        f"Prominent & energy<{energy_cap} → Strong→Even"
+                    )
+
     debug.update({
         "counts": {
             "Front_all": int(n_front),
@@ -244,6 +292,7 @@ def project_pace(rows: List[HorseRow], s: Settings) -> Tuple[str, float, Dict[st
             "Prominent_Questionable": int(n_prom_q),
         },
         "early_energy": float(early_energy),
+        "distance_band": band,
     })
 
     lcp_map = dict(zip(d["horse"], d["lcp"]))
@@ -260,7 +309,21 @@ def suitability(rows: List[HorseRow], s: Settings) -> Tuple[pd.DataFrame, Dict[s
     if scenario == "N/A":
         return pd.DataFrame(), {"error": "pace N/A"}
 
+    # Choose PaceFit by distance band
+    band = _dist_band(getattr(s, "distance_f", 7.0))
+    if band == "5f":
+        pacefit_map = PACEFIT_5F[scenario]
+    elif band == "6f":
+        pacefit_map = PACEFIT_6F[scenario]
+    else:
+        pacefit_map = PACEFIT[scenario]
+
+    # weights: pace matters more in sprints
     wp = s.wp_confident if scenario in ("Slow", "Very Strong") and conf >= 0.65 else s.wp_even
+    if band == "5f":
+        wp = max(wp, 0.60)
+    elif band == "6f":
+        wp = max(wp, 0.55)
     ws = 1 - wp
 
     out = []
@@ -268,7 +331,7 @@ def suitability(rows: List[HorseRow], s: Settings) -> Tuple[pd.DataFrame, Dict[s
         avg = avg_style(r.run_styles)
         style = classify_style(avg, s)
         dvp = delta_vs_par(r.adj_speed, s.class_par)
-        pacefit = PACEFIT[scenario].get(style, 3)
+        pacefit = pacefit_map.get(style, 3)
         speedfit = speed_score(dvp)
         score = round(pacefit * wp + speedfit * ws, 1)
         out.append({
@@ -425,7 +488,8 @@ with st.expander("Why this pace? (Reason used)", expanded=True):
         f"**Front (Questionable):** {counts.get('Front_Questionable', 0)}  \n"
         f"- **Prominent (High):** {counts.get('Prominent_High', 0)} &nbsp;&nbsp; "
         f"**Prominent (Questionable):** {counts.get('Prominent_Questionable', 0)}  \n"
-        f"- **Early energy:** {debug.get('early_energy', 0.0):.2f}"
+        f"- **Early energy:** {debug.get('early_energy', 0.0):.2f}  \n"
+        f"- **Distance band:** {debug.get('distance_band', 'route')}"
     )
     rules = debug.get("rules_applied", [])
     if rules:
@@ -463,4 +527,4 @@ st.download_button(
     mime="text/csv",
 )
 
-st.caption("Front-aware model with no-front cap, dominant-front cap, single-front cap, and weak solo leader adjustments.")
+st.caption("Front-aware model with sprint-aware (5f/6f) handling, no-front & dominant-front caps, single-front cap, and weak solo leader adjustments.")
