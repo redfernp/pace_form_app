@@ -234,102 +234,6 @@ def suitability(rows: List[HorseRow], s: Settings) -> Tuple[pd.DataFrame, Dict[s
     return df, debug
 
 # -----------------------------
-# Trading Suggestions (pace-driven)
-# -----------------------------
-
-def trading_suggestions(res: pd.DataFrame, debug: Dict[str, object]) -> pd.DataFrame:
-    if res.empty:
-        return pd.DataFrame()
-    scenario = str(res.iloc[0].get("Scenario", "Even"))
-    conf = float(res.iloc[0].get("Confidence", 0.6))
-    band = str(debug.get("distance_band", "route"))
-
-    df = res.copy()
-    # Helpers
-    is_front_h = (df["Style"] == "Front") & (df["LCP"] == "High")
-    is_front_q = (df["Style"] == "Front") & (df["LCP"].isin(["Questionable", "Unlikely"]))
-    is_prom    = (df["Style"] == "Prominent")
-    is_mid     = (df["Style"] == "Mid")
-    is_hold    = (df["Style"] == "Hold-up")
-
-    plays: List[Dict[str, object]] = []
-
-    def add_rows(mask, play, entry_note, exit_note, rationale, limit=3):
-        sub = df[mask].sort_values(["Suitability", "ΔvsPar"], ascending=False).head(limit)
-        for _, r in sub.iterrows():
-            plays.append({
-                "Horse": r["Horse"],
-                "Style": r["Style"],
-                "LCP": r["LCP"],
-                "ΔvsPar": r["ΔvsPar"],
-                "Suitability": r["Suitability"],
-                "Play": play,
-                "Entry": entry_note,
-                "Exit": exit_note,
-                "Why": rationale,
-            })
-
-    # Scenario-specific logic
-    if scenario == "Slow":
-        add_rows(is_prom, "Back-to-Lay",
-                 "Back pre-off (handy stalk)",
-                 "Lay @ ~0.6–0.7× entry IR",
-                 "Prominents travel best in Slow races; efficient fractions compress price.")
-        add_rows(is_front_q, "Lay-to-Back",
-                 "Small lay pre-off",
-                 "Back @ 2–3× entry IR",
-                 "Weak/unchallenged fronts tend to drift when challenged late.", limit=2)
-
-    elif scenario == "Even":
-        add_rows(is_front_h, "Back-to-Lay",
-                 "Back pre-off (credible leader)",
-                 "Lay @ ~0.5–0.7× entry IR",
-                 "Even fractions let credible leaders trade short.", limit=2)
-        add_rows(is_prom, "Back-to-Lay",
-                 "Back pre-off (prominent)",
-                 "Lay @ ~0.55–0.75× entry IR",
-                 "Prominent stalkers sit in the sweet spot in Even races.")
-        add_rows(is_hold, "Back-late",
-                 "No pre-off bet",
-                 "Exit if halves to ~0.5× late",
-                 "Closers need late pace; only back reactively.", limit=1)
-
-    elif scenario == "Strong":
-        add_rows(is_front_h, "Back-to-Lay (early)",
-                 "Back pre-off for early dash",
-                 "Lay @ 0.2–0.4× entry by 1–1.5f out",
-                 "Leaders blaze and trade very short before tiring.", limit=2)
-        add_rows(is_prom, "Lay-to-Back",
-                 "Small lay pre-off (chasing heat)",
-                 "Back @ 1.5–2.5× entry IR",
-                 "Prominent chasers flatten behind multiple pace sources.", limit=3)
-        add_rows(is_mid, "Back-late / Cover",
-                 "Watch-only pre-off",
-                 "Lay out if halves late",
-                 "Mids benefit when leaders overdo it; reactive entry.", limit=2)
-
-    else:  # Very Strong
-        add_rows(is_front_h | is_front_q, "Lay-to-Back",
-                 "Lay pre-off (pace meltdown risk)",
-                 "Back @ 3–6× entry IR",
-                 "Very Strong pace punishes leaders.", limit=3)
-        add_rows(is_mid | is_hold, "Back-late",
-                 "No pre-off bet",
-                 "Lay out on 0.4–0.6× move",
-                 "Second-wave mids/closers thrive in meltdowns.", limit=3)
-
-    out = pd.DataFrame(plays)
-    if out.empty:
-        return out
-    # Sort by play then suitability / class edge
-    order = {"Back-to-Lay": 0, "Back-to-Lay (early)": 0, "Lay-to-Back": 1,
-             "Back-late": 2, "Back-late / Cover": 2}
-    out["_ord"] = out["Play"].map(order).fillna(3)
-    out = out.sort_values(["_ord", "Suitability", "ΔvsPar"],
-                          ascending=[True, False, False]).drop(columns=["_ord"]).reset_index(drop=True)
-    return out
-
-# -----------------------------
 # Input Normalization
 # -----------------------------
 
@@ -429,37 +333,19 @@ st.subheader(f"Projected Pace: {scenario} (confidence {conf:.2f})")
 with st.expander("Why this pace?", expanded=True):
     st.write(debug)
 
-# --- Main ratings table
-st.markdown("### Suitability Ratings")
-st.dataframe(res[["Horse","Style","ΔvsPar","LCP","PaceFit","SpeedFit","wp","ws","Suitability"]], use_container_width=True)
+# -- Add AvgPace column for manual analysis
+_df_show = res.copy()
+_df_show["AvgPace"] = _df_show["AvgStyle"].round(2)
+cols_order = ["Horse","AvgPace","Style","ΔvsPar","LCP","PaceFit","SpeedFit","wp","ws","Suitability"]
+cols_order = [c for c in cols_order if c in _df_show.columns]
+st.dataframe(_df_show[cols_order], use_container_width=True)
 
-# --- Trading suggestions section
-st.markdown("### Trading Suggestions (pace-driven)")
-sug = trading_suggestions(res, debug)
-if sug is None or sug.empty:
-    st.info("No trading suggestions for this setup.")
-else:
-    st.dataframe(
-        sug[["Horse","Style","LCP","ΔvsPar","Suitability","Play","Entry","Exit","Why"]],
-        use_container_width=True,
-        hide_index=True,
-    )
-    # Optional: allow download of suggestions
-    st.download_button(
-        "Download trading suggestions CSV",
-        data=sug.to_csv(index=False).encode("utf-8"),
-        file_name="paceform_trading_suggestions.csv",
-        mime="text/csv",
-    )
-    st.caption("Targets are expressed as in-running multiples relative to your entry price "
-               "(e.g., lay @ 0.6× entry = 40% compression). Adjust to liquidity.")
-
-# --- Final verdict (top 3 by Suitability, tie-break SpeedFit)
+# --- Final Verdict (top 3 by Suitability, tie-break SpeedFit)
 st.markdown("### Final Verdict")
-short = res.sort_values(["Suitability", "SpeedFit"], ascending=False).head(3)[[
+_short = res.sort_values(["Suitability","SpeedFit"], ascending=False).head(3)[[
     "Horse","Suitability","Style","ΔvsPar"
 ]]
-for i, row in short.reset_index(drop=True).iterrows():
+for i, row in _short.reset_index(drop=True).iterrows():
     medals = ["🥇","🥈","🥉"][i]
     st.write(f"{medals} **{row['Horse']}** – Score {row['Suitability']} | {row['Style']} | ΔvsPar {row['ΔvsPar']}")
 
@@ -472,5 +358,4 @@ st.download_button(
     mime="text/csv",
 )
 
-st.caption("Front-aware model with sprint-aware (5f/6f) handling, no-front & dominant-front caps, single-front cap, "
-           "weak solo leader, and penalties for missing class figures (adaptive speed weight) + pace-driven trading suggestions.")
+st.caption("Front-aware model with sprint-aware (5f/6f) handling, no-front & dominant-front caps, single-front cap, weak solo leader, and penalties for missing class figures (adaptive speed weight).")
