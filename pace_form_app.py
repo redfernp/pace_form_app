@@ -279,9 +279,10 @@ def project_pace(rows: List[HorseRow], s: Settings) -> Tuple[str, float, Dict[st
             fh_dvps = []
         cond_has_two = (len(fh_dvps) == 2)
         if band == "5f":
+            # Two efficient fronts at 5f can sustain even when early_energy hits exactly 4.0 (= 2 High Fronts)
             cond_efficient = cond_has_two and (min(fh_dvps) >= -3.0) and (max(fh_dvps) <= 1.0)
             cond_pressers  = (n_prom_high <= 1)
-            cond_energy    = (early_energy < 3.6)
+            cond_energy    = (early_energy <= 4.0)  # was < 3.6
         elif band == "6f":
             cond_efficient = cond_has_two and (min(fh_dvps) >= -2.0) and (max(fh_dvps) <= 0.0)
             cond_pressers  = (n_prom_high == 0)
@@ -703,3 +704,4 @@ st.download_button(
 )
 
 st.caption("Front-aware model with sprint-aware (5f/6f) handling, no-front & dominant-front caps, single-front cap, weak solo leader, and penalties for missing class figures (adaptive speed weight).")
+
