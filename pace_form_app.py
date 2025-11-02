@@ -270,8 +270,41 @@ def project_pace(rows: List[HorseRow], s: Settings) -> Tuple[str, float, Dict[st
             conf = max(conf, 0.65)
             debug["rules_applied"].append("Weak solo leader: single Front ΔvsPar≤-8 → downgrade one")
 
-    # 6) SPRINT CAPS (5f & 6f)
+    # 5b) TWO-HIGH-FRONT SUSTAINABILITY (band-aware soft cap)
     band = _dist_band(getattr(s, "distance_f", 7.0))
+    if n_front_high == 2:
+        try:
+            fh_dvps = front_high["dvp"].dropna().astype(float).tolist()
+        except Exception:
+            fh_dvps = []
+        cond_has_two = (len(fh_dvps) == 2)
+        if band == "5f":
+            cond_efficient = cond_has_two and (min(fh_dvps) >= -3.0) and (max(fh_dvps) <= 1.0)
+            cond_pressers  = (n_prom_high <= 1)
+            cond_energy    = (early_energy < 3.6)
+        elif band == "6f":
+            cond_efficient = cond_has_two and (min(fh_dvps) >= -2.0) and (max(fh_dvps) <= 0.0)
+            cond_pressers  = (n_prom_high == 0)
+            cond_energy    = (early_energy < 3.4)
+        else:  # routes (≥7f)
+            cond_efficient = cond_has_two and (min(fh_dvps) >= -1.0) and (max(fh_dvps) <= 0.0)
+            cond_pressers  = (n_prom_high == 0)
+            cond_energy    = (early_energy < 3.0)
+
+        if cond_efficient and cond_pressers and cond_energy:
+            if scenario in ("Strong", "Very Strong"):
+                scenario, conf = "Even", 0.55
+                debug["rules_applied"].append(
+                    f"Two High Fronts {band}: efficient + low pressers + low energy → Strong/Very Strong → Even"
+                )
+        else:
+            if scenario in ("Strong", "Very Strong"):
+                tag = "fragile" if band in ("5f","6f") else "kept"
+                debug["rules_applied"].append(
+                    f"Two High Fronts {band}: conditions not all met → keep {scenario} ({tag})"
+                )
+
+    # 6) SPRINT CAPS (5f & 6f)
     if band in ("5f", "6f"):
         cap_prom_limit = 2
         energy_cap = 4.0 if band == "5f" else 3.6
