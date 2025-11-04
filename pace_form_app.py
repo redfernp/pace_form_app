@@ -57,6 +57,10 @@ PACEFIT = {
     "Very Strong": {"Front": 1, "Prominent": 2, "Mid": 4, "Hold-up": 5},
 }
 
+# --- NEW: Even (Front-Controlled) map for routes
+# Small uplift to Front; Prominent unchanged; mild trims to Mid/Hold-up
+PACEFIT_EVEN_FC = {"Front": 4.5, "Prominent": 5.0, "Mid": 3.5, "Hold-up": 2.5}
+
 # Sprint-specific PaceFit maps
 # 5f: position >> power; 6f: still pace-positional but slightly more forgiving
 PACEFIT_5F = {
@@ -279,10 +283,9 @@ def project_pace(rows: List[HorseRow], s: Settings) -> Tuple[str, float, Dict[st
             fh_dvps = []
         cond_has_two = (len(fh_dvps) == 2)
         if band == "5f":
-            # Two efficient fronts at 5f can sustain even when early_energy hits exactly 4.0 (= 2 High Fronts)
             cond_efficient = cond_has_two and (min(fh_dvps) >= -3.0) and (max(fh_dvps) <= 1.0)
             cond_pressers  = (n_prom_high <= 1)
-            cond_energy    = (early_energy <= 4.0)  # was < 3.6
+            cond_energy    = (early_energy <= 4.0)
         elif band == "6f":
             cond_efficient = cond_has_two and (min(fh_dvps) >= -2.0) and (max(fh_dvps) <= 0.0)
             cond_pressers  = (n_prom_high == 0)
@@ -323,6 +326,19 @@ def project_pace(rows: List[HorseRow], s: Settings) -> Tuple[str, float, Dict[st
                         f"Prominent & energy<{energy_cap} → Strong→Even"
                     )
 
+    # --- NEW: Tag "Even (Front-Controlled)" at routes
+    front_controlled = False
+    scenario_label = scenario
+    try:
+        lf_dvp_fc = float(front_high["dvp"].iloc[0]) if n_front_high == 1 else None
+    except Exception:
+        lf_dvp_fc = None
+    if band == "route" and scenario == "Even" and n_front_high == 1 and n_prom_high <= 1 and (lf_dvp_fc is not None) and (lf_dvp_fc >= -1.0):
+        front_controlled = True
+        scenario_label = "Even (Front-Controlled)"
+        debug["rules_applied"].append("Front-controlled tag: 1 High Front, ≤1 High Prominent, route, ΔvsPar≥-1 → Even (Front-Controlled)")
+    debug["front_controlled"] = bool(front_controlled)
+
     debug.update({
         "counts": {
             "Front_all": int(n_front),
@@ -336,7 +352,7 @@ def project_pace(rows: List[HorseRow], s: Settings) -> Tuple[str, float, Dict[st
     })
 
     lcp_map = dict(zip(d["horse"], d["lcp"]))
-    return scenario, conf, lcp_map, debug
+    return scenario_label, conf, lcp_map, debug
 
 # -----------------------------
 # Suitability Scoring
@@ -351,7 +367,13 @@ def suitability(rows: List[HorseRow], s: Settings) -> Tuple[pd.DataFrame, Dict[s
 
     # Choose PaceFit by distance band
     band = _dist_band(getattr(s, "distance_f", 7.0))
-    if band == "5f":
+    if scenario.startswith("Even (Front-Controlled)"):
+        if band == "route":
+            pacefit_map = PACEFIT_EVEN_FC
+        else:
+            # outside routes, fall back to standard "Even"
+            pacefit_map = PACEFIT_6F["Even"] if band == "6f" else (PACEFIT_5F["Even"] if band == "5f" else PACEFIT["Even"])
+    elif band == "5f":
         pacefit_map = PACEFIT_5F[scenario]
     elif band == "6f":
         pacefit_map = PACEFIT_6F[scenario]
@@ -415,6 +437,9 @@ def trading_suggestions(res: pd.DataFrame, debug: Dict[str, object]) -> pd.DataF
     if res.empty:
         return pd.DataFrame()
     scenario = str(res.iloc[0].get("Scenario", "Even"))
+    # Treat any Even-like label (incl. Even (Front-Controlled)) as "Even" for plays
+    if scenario.startswith("Even"):
+        scenario = "Even"
     # conf = float(res.iloc[0].get("Confidence", 0.6))  # kept for future use
     # band = str(debug.get("distance_band", "route"))    # kept for future use
 
@@ -704,4 +729,3 @@ st.download_button(
 )
 
 st.caption("Front-aware model with sprint-aware (5f/6f) handling, no-front & dominant-front caps, single-front cap, weak solo leader, and penalties for missing class figures (adaptive speed weight).")
-
